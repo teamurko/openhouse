@@ -14,6 +14,7 @@ import lombok.Getter;
 @EqualsAndHashCode
 public class DataLayoutOptimizationStrategy {
   private final double cost;
+  private final double gain;
   private final DataCompactionConfig config;
   // TODO: support sorting config
 }

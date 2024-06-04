@@ -6,8 +6,10 @@ import com.linkedin.openhouse.datalayout.datasource.TableFileStats;
 import java.util.Collections;
 import java.util.List;
 import lombok.Builder;
+import org.apache.spark.api.java.function.FilterFunction;
 import org.apache.spark.api.java.function.MapFunction;
 import org.apache.spark.api.java.function.ReduceFunction;
+import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Encoders;
 
 /**
@@ -43,9 +45,8 @@ public class OpenHouseDataLayoutGenerator implements DataLayoutGenerator {
 
     DataCompactionConfig.DataCompactionConfigBuilder configBuilder = DataCompactionConfig.builder();
 
-    // Make sure the last block is almost full
-    long targetByteSize = 2 * FILE_BLOCK_SIZE_BYTES - FILE_BLOCK_MARGIN_BYTES;
-    configBuilder.targetByteSize(targetByteSize);
+    long targetBytesSize = calculateTargetBytesSize();
+    configBuilder.targetByteSize(targetBytesSize);
 
     // TODO: take partitioning into account
     // This is a under-estimation if partitions are smaller than
@@ -63,7 +64,7 @@ public class OpenHouseDataLayoutGenerator implements DataLayoutGenerator {
     configBuilder.partialProgressMaxCommits(maxNumCommits);
 
     int estimatedNumTasksPerFileGroup =
-        (int) (DataCompactionConfig.MAX_FILE_GROUP_SIZE_BYTES_DEFAULT / targetByteSize);
+        (int) (DataCompactionConfig.MAX_FILE_GROUP_SIZE_BYTES_DEFAULT / targetBytesSize);
 
     // TODO: take partitioning into account
     // This is a under-estimation if partitions are much smaller than
@@ -80,9 +81,32 @@ public class OpenHouseDataLayoutGenerator implements DataLayoutGenerator {
     return DataLayoutOptimizationStrategy.builder()
         .config(configBuilder.build())
         .cost(calculateCompactionCost())
+        .gain(calculateCompactionGain())
         .build();
   }
 
+  private long calculateTargetBytesSize() {
+    // Make sure the last block is almost full
+    return 2 * FILE_BLOCK_SIZE_BYTES - FILE_BLOCK_MARGIN_BYTES;
+  }
+
+  /** Calculate the gain of compaction in terms of number of files reduced. */
+  private double calculateCompactionGain() {
+    long targetBytesSize = calculateTargetBytesSize();
+    Dataset<Long> compactionCandidates =
+        tableFileStats
+            .get()
+            .map((MapFunction<FileStat, Long>) FileStat::getSize, Encoders.LONG())
+            .filter(
+                (FilterFunction<Long>)
+                    size ->
+                        size < targetBytesSize * DataCompactionConfig.MIN_BYTE_SIZE_RATIO_DEFAULT);
+    long numFiles = compactionCandidates.count();
+    long totalSizeBytes = compactionCandidates.reduce((ReduceFunction<Long>) Long::sum);
+    return (double) (numFiles - totalSizeBytes / targetBytesSize);
+  }
+
+  /** Calculate the cost of compaction in seconds. */
   private double calculateCompactionCost() {
     return (double)
             tableFileStats
