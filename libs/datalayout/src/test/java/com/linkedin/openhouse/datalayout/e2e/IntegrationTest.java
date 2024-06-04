@@ -1,48 +1,34 @@
 package com.linkedin.openhouse.datalayout.e2e;
 
-import com.google.gson.Gson;
-import com.google.gson.GsonBuilder;
-import com.google.gson.reflect.TypeToken;
 import com.linkedin.openhouse.datalayout.datasource.TableFileStats;
 import com.linkedin.openhouse.datalayout.layoutselection.DataLayoutOptimizationStrategy;
 import com.linkedin.openhouse.datalayout.layoutselection.OpenHouseDataLayoutGenerator;
+import com.linkedin.openhouse.datalayout.persistence.Utils;
 import com.linkedin.openhouse.tablestest.OpenHouseSparkITest;
-import java.lang.reflect.Type;
-import java.util.ArrayList;
 import java.util.List;
-import org.apache.commons.lang.StringEscapeUtils;
 import org.apache.spark.sql.SparkSession;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 public class IntegrationTest extends OpenHouseSparkITest {
   @Test
-  public void testLayoutSelectionWithPersistence() throws Exception {
-    final String testTable = "db.test_table_selection";
+  public void testCompactionStrategyGenerationWithPersistence() throws Exception {
+    final String testTable = "db.test_table";
     try (SparkSession spark = getSparkSession()) {
       spark.sql("USE openhouse");
       createTestTable(spark, testTable, 10);
       TableFileStats tableFileStats =
           TableFileStats.builder().tableName(testTable).spark(spark).build();
-      OpenHouseDataLayoutGenerator layoutSelectionPolicy =
+      OpenHouseDataLayoutGenerator strategyGenerator =
           OpenHouseDataLayoutGenerator.builder().tableFileStats(tableFileStats).build();
-      List<DataLayoutOptimizationStrategy> compactionLayouts = layoutSelectionPolicy.generate();
-      Assertions.assertEquals(526385152, compactionLayouts.get(0).getConfig().getTargetByteSize());
-      Gson gson = new GsonBuilder().create();
-      Type type = new TypeToken<ArrayList<DataLayoutOptimizationStrategy>>() {}.getType();
-      String serializedLayout = gson.toJson(compactionLayouts, type);
-      spark.sql(
-          String.format(
-              "alter table %s set tblproperties ('data-layout' = '%s')",
-              testTable, StringEscapeUtils.escapeJava(serializedLayout)));
-      serializedLayout =
-          spark
-              .sql(String.format("show tblproperties %s ('data-layout')", testTable))
-              .collectAsList()
-              .get(0)
-              .getString(1);
-      compactionLayouts = gson.fromJson(StringEscapeUtils.unescapeJava(serializedLayout), type);
-      Assertions.assertEquals(526385152, compactionLayouts.get(0).getConfig().getTargetByteSize());
+      List<DataLayoutOptimizationStrategy> strategies = strategyGenerator.generate();
+      Assertions.assertEquals(1, strategies.size());
+      Assertions.assertEquals(1, strategies.get(0).getConfig().getPartialProgressMaxCommits());
+      Assertions.assertTrue(strategies.get(0).getConfig().isPartialProgressEnabled());
+      Utils.saveStrategies(spark, testTable, strategies);
+      List<DataLayoutOptimizationStrategy> retrievedStrategies =
+          Utils.loadStrategies(spark, testTable);
+      Assertions.assertEquals(strategies, retrievedStrategies);
     }
   }
 

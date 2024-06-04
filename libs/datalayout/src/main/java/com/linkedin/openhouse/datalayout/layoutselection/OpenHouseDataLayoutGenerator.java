@@ -31,6 +31,10 @@ public class OpenHouseDataLayoutGenerator implements DataLayoutGenerator {
    */
   @Override
   public List<DataLayoutOptimizationStrategy> generate() {
+    return Collections.singletonList(generateCompactionStrategy());
+  }
+
+  private DataLayoutOptimizationStrategy generateCompactionStrategy() {
     long totalSizeBytes =
         tableFileStats
             .get()
@@ -51,7 +55,11 @@ public class OpenHouseDataLayoutGenerator implements DataLayoutGenerator {
             1, (int) (totalSizeBytes / DataCompactionConfig.MAX_FILE_GROUP_SIZE_BYTES_DEFAULT));
 
     int maxNumCommits =
-        (int) Math.min(1000L, estimatedMaxNumFileGroups / NUM_FILE_GROUPS_PER_COMMIT);
+        (int)
+            Math.min(
+                1000L,
+                (estimatedMaxNumFileGroups + NUM_FILE_GROUPS_PER_COMMIT - 1)
+                    / NUM_FILE_GROUPS_PER_COMMIT);
     configBuilder.partialProgressMaxCommits(maxNumCommits);
 
     int estimatedNumTasksPerFileGroup =
@@ -69,11 +77,10 @@ public class OpenHouseDataLayoutGenerator implements DataLayoutGenerator {
     // don't split large files
     configBuilder.maxByteSizeRatio(10);
 
-    return Collections.singletonList(
-        DataLayoutOptimizationStrategy.builder()
-            .config(configBuilder.build())
-            .cost(calculateCompactionCost())
-            .build());
+    return DataLayoutOptimizationStrategy.builder()
+        .config(configBuilder.build())
+        .cost(calculateCompactionCost())
+        .build();
   }
 
   private double calculateCompactionCost() {
