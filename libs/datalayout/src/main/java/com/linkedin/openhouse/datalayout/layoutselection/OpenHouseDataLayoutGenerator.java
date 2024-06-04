@@ -16,10 +16,13 @@ import org.apache.spark.sql.Encoders;
  */
 @Builder
 public class OpenHouseDataLayoutGenerator implements DataLayoutGenerator {
-  private static final long FILE_BLOCK_SIZE_BYTES = 1024L * 1024L * 256;
-  private static final long FILE_BLOCK_MARGIN_BYTES = 1024L * 1024L * 10;
+  private static final long FILE_BLOCK_SIZE_BYTES = 1024L * 1024L * 256; // 256MB
+  private static final long FILE_BLOCK_MARGIN_BYTES = 1024L * 1024L * 10; // 10MB
   private static final long NUM_FILE_GROUPS_PER_COMMIT = 50;
   private static final double FILE_ENTROPY_THRESHOLD = 100.0;
+  private static final long FILE_OPEN_COST_IN_BYTES = 1024L * 1024L * 4; // 4MB
+  private static final long REWRITE_BYTES_PER_SECOND = 1024L * 1024L * 2; // 2MB/s
+  private static final int REWRITE_PARALLELISM = 900; // number of Spark tasks to run in parallel
   private final TableFileStats tableFileStats;
 
   /**
@@ -28,32 +31,60 @@ public class OpenHouseDataLayoutGenerator implements DataLayoutGenerator {
    */
   @Override
   public List<DataLayoutOptimizationStrategy> generate() {
-    long totalSize =
+    long totalSizeBytes =
         tableFileStats
             .get()
             .map((MapFunction<FileStat, Long>) FileStat::getSize, Encoders.LONG())
             .reduce((ReduceFunction<Long>) Long::sum);
-    long numFiles = tableFileStats.get().count();
 
     DataCompactionConfig.DataCompactionConfigBuilder configBuilder = DataCompactionConfig.builder();
-    // Make sure the last block is almost full
-    configBuilder.targetByteSize(2 * FILE_BLOCK_SIZE_BYTES - FILE_BLOCK_MARGIN_BYTES);
 
-    long estimatedMaxNumFileGroups =
-        totalSize / DataCompactionConfig.MAX_FILE_GROUP_SIZE_BYTES_DEFAULT;
+    // Make sure the last block is almost full
+    long targetByteSize = 2 * FILE_BLOCK_SIZE_BYTES - FILE_BLOCK_MARGIN_BYTES;
+    configBuilder.targetByteSize(targetByteSize);
+
+    // TODO: take partitioning into account
+    // This is a under-estimation if partitions are smaller than
+    // DataCompactionConfig.MAX_FILE_GROUP_SIZE_BYTES_DEFAULT
+    int estimatedMaxNumFileGroups =
+        Math.max(
+            1, (int) (totalSizeBytes / DataCompactionConfig.MAX_FILE_GROUP_SIZE_BYTES_DEFAULT));
+
     int maxNumCommits =
         (int) Math.min(1000L, estimatedMaxNumFileGroups / NUM_FILE_GROUPS_PER_COMMIT);
     configBuilder.partialProgressMaxCommits(maxNumCommits);
-    // TODO: this should be determined by partition size in order to utilize Spark app parallelism
-    configBuilder.maxConcurrentFileGroupRewrites(50);
+
+    int estimatedNumTasksPerFileGroup =
+        (int) (DataCompactionConfig.MAX_FILE_GROUP_SIZE_BYTES_DEFAULT / targetByteSize);
+
+    // TODO: take partitioning into account
+    // This is a under-estimation if partitions are much smaller than
+    // DataCompactionConfig.MAX_FILE_GROUP_SIZE_BYTES_DEFAULT
+    configBuilder.maxConcurrentFileGroupRewrites(
+        Math.min(
+            50,
+            (estimatedNumTasksPerFileGroup + REWRITE_PARALLELISM - 1)
+                / estimatedNumTasksPerFileGroup));
+
     // don't split large files
     configBuilder.maxByteSizeRatio(10);
 
     return Collections.singletonList(
-        DataLayoutOptimizationStrategy.builder().config(configBuilder.build()).score(1.0).build());
+        DataLayoutOptimizationStrategy.builder()
+            .config(configBuilder.build())
+            .cost(calculateCompactionCost())
+            .build());
   }
 
   private double calculateCompactionCost() {
-    return 0.0;
+    return (double)
+            tableFileStats
+                .get()
+                .map(
+                    (MapFunction<FileStat, Long>)
+                        (fs -> Math.max(fs.getSize(), FILE_OPEN_COST_IN_BYTES)),
+                    Encoders.LONG())
+                .reduce((ReduceFunction<Long>) Long::sum)
+        / REWRITE_BYTES_PER_SECOND;
   }
 }
